@@ -1,17 +1,33 @@
 import React, { useState } from 'react'
 import axios from 'axios'
 
+const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8001'
+
+function humanFileSize(bytes) {
+    if (!bytes) return '-'
+    const thresh = 1024
+    if (Math.abs(bytes) < thresh) return bytes + ' B'
+    const units = ['KB', 'MB', 'GB', 'TB']
+    let u = -1
+    do {
+        bytes /= thresh
+        ++u
+    } while (Math.abs(bytes) >= thresh && u < units.length - 1)
+    return bytes.toFixed(1) + ' ' + units[u]
+}
+
 export default function App() {
     const [url, setUrl] = useState('')
     const [info, setInfo] = useState(null)
     const [loading, setLoading] = useState(false)
-    const [downloadFormat, setDownloadFormat] = useState(null)
+    const [downloading, setDownloading] = useState(false)
+    const [progress, setProgress] = useState(0)
 
     const fetchInfo = async () => {
         setLoading(true)
         setInfo(null)
         try {
-            const res = await axios.post('http://localhost:8000/api/info', { url })
+            const res = await axios.post(`${BACKEND}/api/info`, { url })
             setInfo(res.data)
         } catch (err) {
             alert('Error fetching info: ' + (err?.response?.data?.detail || err.message))
@@ -22,10 +38,17 @@ export default function App() {
 
     const download = async (format_id) => {
         try {
-            // Trigger browser download by navigating to blob URL
-            const res = await axios.post('http://localhost:8000/api/download', { url, format_id }, {
-                responseType: 'blob'
+            setDownloading(true)
+            setProgress(0)
+            const res = await axios.post(`${BACKEND}/api/download`, { url, format_id }, {
+                responseType: 'blob',
+                onDownloadProgress: (evt) => {
+                    if (evt.lengthComputable) {
+                        setProgress(Math.round((evt.loaded / evt.total) * 100))
+                    }
+                }
             })
+
             const disposition = res.headers['content-disposition'] || ''
             let filename = 'download'
             const m = /filename=\"?([^\";]+)\"?/.exec(disposition)
@@ -39,6 +62,9 @@ export default function App() {
             link.remove()
         } catch (err) {
             alert('Download failed: ' + (err?.response?.data?.detail || err.message))
+        } finally {
+            setDownloading(false)
+            setProgress(0)
         }
     }
 
@@ -59,8 +85,16 @@ export default function App() {
 
             {info && (
                 <div>
-                    <h4>{info.title}</h4>
-                    <p>Uploader: {info.uploader} • Duration: {info.duration}s</p>
+                    <div className="d-flex gap-3 align-items-start mb-3">
+                        {info.thumbnails && info.thumbnails.length > 0 && (
+                            <img src={info.thumbnails[info.thumbnails.length - 1].url} alt="thumbnail" style={{ maxWidth: 220, borderRadius: 8 }} />
+                        )}
+                        <div>
+                            <h4 className="mb-1">{info.title}</h4>
+                            <p className="mb-1">Uploader: {info.uploader} • Duration: {info.duration}s</p>
+                            <p className="text-muted small mb-0">ID: {info.id}</p>
+                        </div>
+                    </div>
 
                     <h5>Formats</h5>
                     <div className="table-responsive">
@@ -81,16 +115,28 @@ export default function App() {
                                     <tr key={f.format_id}>
                                         <td>{f.format_id}</td>
                                         <td>{f.ext}</td>
-                                        <td>{f.format_note}</td>
-                                        <td>{f.filesize ? (Math.round(f.filesize / 1024) + ' KB') : '-'}</td>
+                                        <td style={{ maxWidth: 200 }}>{f.format_note}</td>
+                                        <td>{humanFileSize(f.filesize)}</td>
                                         <td>{f.acodec}</td>
                                         <td>{f.vcodec}</td>
-                                        <td><button className="btn btn-sm btn-success" onClick={() => download(f.format_id)}>Download</button></td>
+                                        <td>
+                                            <button className="btn btn-sm btn-success" onClick={() => download(f.format_id)} disabled={downloading}>
+                                                {downloading ? 'Downloading...' : 'Download'}
+                                            </button>
+                                        </td>
                                     </tr>
                                 ))}
                             </tbody>
                         </table>
                     </div>
+
+                    {downloading && (
+                        <div className="mt-3">
+                            <div className="progress">
+                                <div className="progress-bar" role="progressbar" style={{ width: `${progress}%` }} aria-valuenow={progress} aria-valuemin="0" aria-valuemax="100">{progress}%</div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
 
