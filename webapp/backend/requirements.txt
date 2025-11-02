@@ -4,3 +4,5 @@ yt-dlp
 aiofiles
 python-multipart
 python-magic
+redis
+rq

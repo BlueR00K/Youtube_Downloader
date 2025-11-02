@@ -7,7 +7,9 @@ from pydantic import BaseModel
 import mimetypes
 
 from app.ytdl import get_info, download_to_file
-
+from app.ratelimit import rate_limiter
+from fastapi import Depends
+from fastapi.security import APIKeyHeader
 import os
 
 app = FastAPI(title="Youtube Downloader API")
@@ -37,20 +39,27 @@ class DownloadRequest(BaseModel):
     format_id: str | None = None
 
 
-def _check_api_key(request: Request):
-    """Return True if API key is not set or matches header; raises HTTPException otherwise."""
-    api_key = os.getenv("API_KEY")
-    if not api_key:
-        return True
-    header = request.headers.get(
-        "x-api-key") or request.headers.get("X-API-KEY")
-    if header == api_key:
-        return True
-    raise HTTPException(status_code=401, detail="Invalid or missing API key")
+# Dependency: enforce API key (if set) and rate limiting per client
+api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
+
+
+async def auth_and_rate_limit(request: Request, api_key: str | None = Depends(api_key_header)):
+    """Check API key if configured, then apply a simple rate limit per key or client IP."""
+    configured = os.getenv("API_KEY")
+    # verify API key if configured
+    if configured:
+        if not api_key or api_key != configured:
+            raise HTTPException(
+                status_code=401, detail="Invalid or missing API key")
+
+    # choose rate-limit key: API key if present, else client IP
+    key = api_key if api_key else (
+        request.client.host if request.client else "unknown")
+    rate_limiter.check(key)
 
 
 @app.post("/api/info")
-async def api_info(req: InfoRequest):
+async def api_info(req: InfoRequest, _=Depends(auth_and_rate_limit)):
     # Optional API key check
     try:
         # pydantic created a dict for req; build a fake Request for header-based auth not available here
@@ -84,7 +93,7 @@ async def api_info(req: InfoRequest):
 
 
 @app.post("/api/download")
-async def api_download(req: DownloadRequest):
+async def api_download(req: DownloadRequest, _=Depends(auth_and_rate_limit)):
     # Enforce API key (if configured)
     # FastAPI Request object isn't directly available from Pydantic body; rely on header via dependency if needed.
     # For simplicity in this single-file app, check environ API_KEY and disallow if not passed via header.
