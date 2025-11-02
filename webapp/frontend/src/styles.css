@@ -1,0 +1,22 @@
+:root {
+    --accent: #0d6efd;
+    --muted: #6c757d;
+}
+
+body {
+    background: linear-gradient(180deg, #f8fafc, #ffffff);
+    min-height: 100vh;
+}
+
+.container {
+    max-width: 980px;
+}
+
+.thumbnail {
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(13, 110, 253, 0.08);
+}
+
+.app-title {
+    letter-spacing: -0.5px;
+}
