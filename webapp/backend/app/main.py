@@ -1,5 +1,7 @@
 import os
 import shutil
+import tempfile
+import zipfile
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,6 +39,16 @@ class InfoRequest(BaseModel):
 class DownloadRequest(BaseModel):
     url: str
     format_id: str | None = None
+
+
+class InfoListRequest(BaseModel):
+    urls: list[str]
+
+
+class BatchDownloadRequest(BaseModel):
+    # Either provide `items` with url+optional format, or `urls` where format_id applies to all
+    items: list[DownloadRequest] | None = None
+    urls: list[str] | None = None
 
 
 # Dependency: enforce API key (if set) and rate limiting per client
@@ -92,6 +104,39 @@ async def api_info(req: InfoRequest, _=Depends(auth_and_rate_limit)):
     return JSONResponse(out)
 
 
+@app.post("/api/infos")
+async def api_infos(req: InfoListRequest, _=Depends(auth_and_rate_limit)):
+    results = []
+    for url in req.urls:
+        try:
+            info = get_info(url)
+            out = {
+                "url": url,
+                "title": info.get("title"),
+                "id": info.get("id"),
+                "uploader": info.get("uploader"),
+                "duration": info.get("duration"),
+                "thumbnails": info.get("thumbnails"),
+                "formats": [
+                    {
+                        "format_id": f.get("format_id"),
+                        "ext": f.get("ext"),
+                        "format_note": f.get("format_note"),
+                        "filesize": f.get("filesize"),
+                        "height": f.get("height"),
+                        "width": f.get("width"),
+                        "acodec": f.get("acodec"),
+                        "vcodec": f.get("vcodec"),
+                    }
+                    for f in info.get("formats", [])
+                ],
+            }
+        except Exception as e:
+            out = {"url": url, "error": str(e)}
+        results.append(out)
+    return JSONResponse(results)
+
+
 @app.post("/api/download")
 async def api_download(req: DownloadRequest, _=Depends(auth_and_rate_limit)):
     # Enforce API key (if configured)
@@ -132,3 +177,77 @@ async def api_download(req: DownloadRequest, _=Depends(auth_and_rate_limit)):
 
     headers = {"Content-Disposition": f"attachment; filename=\"{filename}\""}
     return StreamingResponse(iterfile(file_path), media_type=mime_type, headers=headers)
+
+
+@app.post("/api/downloads")
+async def api_downloads(req: BatchDownloadRequest, _=Depends(auth_and_rate_limit)):
+    # Build normalized list of DownloadRequest items
+    items: list[DownloadRequest] = []
+    if req.items:
+        items = req.items
+    elif req.urls:
+        items = [DownloadRequest(url=u) for u in req.urls]
+    else:
+        raise HTTPException(status_code=400, detail="No urls/items provided")
+
+    # Prepare a temp workspace for the zip
+    workspace = tempfile.mkdtemp(prefix="ytdl_batch_")
+    downloaded_paths = []
+    try:
+        # Download each file (blocking call to download_to_file)
+        for it in items:
+            try:
+                p = download_to_file(it.url, it.format_id)
+            except Exception as e:
+                # record failures as simple text files so user knows
+                err_path = os.path.join(
+                    workspace, f"error_{len(downloaded_paths)}.txt")
+                with open(err_path, "w", encoding="utf-8") as ef:
+                    ef.write(f"Failed to download {it.url}: {e}\n")
+                downloaded_paths.append(err_path)
+                continue
+
+            # copy the file into our workspace (download_to_file may create its own temp dir)
+            try:
+                target = os.path.join(workspace, os.path.basename(p))
+                shutil.copy(p, target)
+                downloaded_paths.append(target)
+            except Exception:
+                # if copy fails, still try to include original
+                downloaded_paths.append(p)
+
+        # Create a zip archive containing all files
+        zip_path = os.path.join(workspace, "downloads.zip")
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for path in downloaded_paths:
+                # ensure file exists
+                if os.path.exists(path):
+                    zf.write(path, arcname=os.path.basename(path))
+
+        # Stream the zip file and cleanup afterwards
+        def iterzip(p: str):
+            try:
+                with open(p, "rb") as f:
+                    for chunk in iter(lambda: f.read(8192), b""):
+                        yield chunk
+            finally:
+                # cleanup workspace and any leftover temp dirs
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+                try:
+                    shutil.rmtree(workspace, ignore_errors=True)
+                except Exception:
+                    pass
+
+        headers = {"Content-Disposition": "attachment; filename=downloads.zip"}
+        return StreamingResponse(iterzip(zip_path), media_type="application/zip", headers=headers)
+    except Exception as e:
+        # ensure workspace is removed on unexpected errors
+        try:
+            shutil.rmtree(workspace, ignore_errors=True)
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=str(e))
