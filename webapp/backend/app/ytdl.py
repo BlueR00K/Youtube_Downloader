@@ -1,6 +1,6 @@
 import os
 import tempfile
-from typing import Dict, Any
+from typing import Dict, Any, Callable, Optional
 from yt_dlp import YoutubeDL
 
 
@@ -12,7 +12,7 @@ def get_info(url: str) -> Dict[str, Any]:
     return info
 
 
-def download_to_file(url: str, format_id: str | None = None) -> str:
+def download_to_file(url: str, format_id: str | None = None, progress_hook: Optional[Callable[[dict], None]] = None) -> str:
     """Download the requested format to a temporary file and return its path.
 
     Caller is responsible for deleting the file after use.
@@ -34,6 +34,11 @@ def download_to_file(url: str, format_id: str | None = None) -> str:
     }
     if format_id:
         ydl_opts["format"] = format_id
+
+    # Attach progress hook if provided
+    if progress_hook:
+        # yt-dlp expects a callable that accepts a status dict
+        ydl_opts["progress_hooks"] = [progress_hook]
 
     # Try a small retry loop around yt-dlp in case of intermittent SSL/network failures
     last_exc: Exception | None = None

@@ -4,6 +4,8 @@ import tempfile
 import zipfile
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+import asyncio
+import json
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import mimetypes
@@ -37,6 +39,31 @@ if not logger.handlers:
         handlers=handlers,
     )
     logger = logging.getLogger("ytdl")
+
+
+# Simple progress notifier for Server-Sent Events (SSE)
+class ProgressNotifier:
+    def __init__(self):
+        # map download_id -> asyncio.Queue
+        self.queues: Dict[str, asyncio.Queue] = {}
+
+    def get_queue(self, download_id: str) -> asyncio.Queue:
+        if download_id not in self.queues:
+            self.queues[download_id] = asyncio.Queue()
+        return self.queues[download_id]
+
+    async def publish(self, download_id: str, message: dict) -> None:
+        q = self.get_queue(download_id)
+        await q.put(message)
+
+    async def iterate(self, download_id: str):
+        q = self.get_queue(download_id)
+        while True:
+            msg = await q.get()
+            yield msg
+
+
+notifier = ProgressNotifier()
 
 
 def _clean_exc_msg(e: Exception) -> str:
@@ -172,16 +199,50 @@ async def api_infos(req: InfoListRequest, _=Depends(auth_and_rate_limit)):
 
 
 @app.post("/api/download")
-async def api_download(req: DownloadRequest, _=Depends(auth_and_rate_limit)):
+async def api_download(req: DownloadRequest, request: Request, _=Depends(auth_and_rate_limit)):
     # Enforce API key (if configured)
     # FastAPI Request object isn't directly available from Pydantic body; rely on header via dependency if needed.
     # For simplicity in this single-file app, check environ API_KEY and disallow if not passed via header.
     # The Request object is available as dependency injection if we wanted it; keep this straightforward.
+    download_id = request.headers.get("X-Download-Id")
+
+    def _progress_hook(status: dict):
+        try:
+            if not download_id:
+                return
+            out = {
+                "status": status.get("status"),
+                "downloaded_bytes": status.get("downloaded_bytes"),
+                "total_bytes": status.get("total_bytes") or status.get("total_bytes_estimate"),
+                "filename": status.get("filename"),
+                "speed": status.get("speed"),
+                "eta": status.get("eta"),
+            }
+            asyncio.create_task(notifier.publish(download_id, out))
+        except Exception:
+            logger.exception("progress hook failed")
+
     try:
-        file_path = download_to_file(req.url, req.format_id)
+        file_path = download_to_file(
+            req.url, req.format_id, progress_hook=_progress_hook)
     except Exception as e:
         logger.exception("Error in api_download for %s", req.url)
         raise HTTPException(status_code=500, detail=_clean_exc_msg(e))
+
+    @app.get("/api/progress/{download_id}")
+    async def progress_stream(download_id: str):
+        async def event_generator():
+            try:
+                async for msg in notifier.iterate(download_id):
+                    try:
+                        s = json.dumps(msg)
+                    except Exception:
+                        s = json.dumps({"error": "bad message"})
+                    yield f"data: {s}\n\n"
+            except asyncio.CancelledError:
+                return
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     if not os.path.exists(file_path):
         raise HTTPException(
@@ -219,11 +280,16 @@ async def api_download(req: DownloadRequest, _=Depends(auth_and_rate_limit)):
     headers = {"Content-Disposition": f"attachment; filename=\"{filename}\""}
     if file_size is not None:
         headers["Content-Length"] = str(file_size)
+
+    # publish final event
+    if download_id:
+        asyncio.create_task(notifier.publish(
+            download_id, {"status": "finished", "filename": file_path}))
     return StreamingResponse(iterfile(file_path), media_type=mime_type, headers=headers)
 
 
 @app.post("/api/downloads")
-async def api_downloads(req: BatchDownloadRequest, _=Depends(auth_and_rate_limit)):
+async def api_downloads(req: BatchDownloadRequest, request: Request, _=Depends(auth_and_rate_limit)):
     # Build normalized list of DownloadRequest items
     items: list[DownloadRequest] = []
     if req.items:
@@ -236,11 +302,32 @@ async def api_downloads(req: BatchDownloadRequest, _=Depends(auth_and_rate_limit
     # Prepare a temp workspace for the zip
     workspace = tempfile.mkdtemp(prefix="ytdl_batch_")
     downloaded_paths = []
+    download_id = request.headers.get("X-Download-Id")
+
+    def make_hook(idx: int):
+        def hook(status: dict):
+            try:
+                if not download_id:
+                    return
+                out = {
+                    "status": status.get("status"),
+                    "idx": idx,
+                    "downloaded_bytes": status.get("downloaded_bytes"),
+                    "total_bytes": status.get("total_bytes") or status.get("total_bytes_estimate"),
+                    "filename": status.get("filename"),
+                }
+                asyncio.create_task(notifier.publish(download_id, out))
+            except Exception:
+                logger.exception("batch progress hook failed")
+
+        return hook
+
     try:
         # Download each file (blocking call to download_to_file)
-        for it in items:
+        for idx, it in enumerate(items):
             try:
-                p = download_to_file(it.url, it.format_id)
+                p = download_to_file(it.url, it.format_id,
+                                     progress_hook=make_hook(idx))
             except Exception as e:
                 logger.exception("Batch download error for %s", it.url)
                 # record failures as simple text files so user knows
@@ -294,6 +381,9 @@ async def api_downloads(req: BatchDownloadRequest, _=Depends(auth_and_rate_limit
             zsize = None
         if zsize is not None:
             headers["Content-Length"] = str(zsize)
+        if download_id:
+            asyncio.create_task(notifier.publish(
+                download_id, {"status": "batch_finished", "filename": zip_path}))
         return StreamingResponse(iterzip(zip_path), media_type="application/zip", headers=headers)
     except Exception as e:
         logger.exception("Unexpected error in api_downloads")

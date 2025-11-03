@@ -50,10 +50,35 @@ export default function App() {
     try {
       setDownloading(true)
       setProgress(0)
+      const downloadId = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      let es
+      try {
+        es = new EventSource(`${BACKEND}/api/progress/${downloadId}`)
+        es.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data)
+            const total = msg.total_bytes || msg.total_bytes_estimate
+            const downloaded = msg.downloaded_bytes || 0
+            if (total && total > 0) {
+              setProgress(Math.round((downloaded / total) * 100))
+            } else if (msg.status === 'finished') {
+              setProgress(100)
+            }
+          } catch (e) {
+            // ignore parse errors
+          }
+        }
+      } catch (e) {
+        // EventSource may not be available or SSE endpoint unreachable; fall back to xhr progress
+        es = null
+      }
       const res = await axios.post(`${BACKEND}/api/download`, { url: targetUrl, format_id }, {
         responseType: 'blob',
         onDownloadProgress: (evt) => {
           if (evt.lengthComputable) setProgress(Math.round((evt.loaded / evt.total) * 100))
+        },
+        headers: {
+          'X-Download-Id': downloadId
         }
       })
       const disposition = res.headers['content-disposition'] || ''
@@ -71,7 +96,8 @@ export default function App() {
       alert('Download failed: ' + (err?.response?.data?.detail || err.message))
     } finally {
       setDownloading(false)
-      setProgress(0)
+      setTimeout(() => setProgress(0), 1500)
+      try { if (es) es.close() } catch (e) { }
     }
   }
 
@@ -79,6 +105,24 @@ export default function App() {
     try {
       setDownloading(true)
       setProgress(0)
+      const downloadId = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      let es
+      try {
+        es = new EventSource(`${BACKEND}/api/progress/${downloadId}`)
+        es.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data)
+            // If batch publishes idx-based messages, we could aggregate. For now use any total/downloaded to compute percent.
+            const total = msg.total_bytes || msg.total_bytes_estimate
+            const downloaded = msg.downloaded_bytes || 0
+            if (total && total > 0) {
+              setProgress(Math.round((downloaded / total) * 100))
+            } else if (msg.status === 'batch_finished' || msg.status === 'finished') {
+              setProgress(100)
+            }
+          } catch (e) { }
+        }
+      } catch (e) { es = null }
       const urls = multiUrls.split('\n').map(s => s.trim()).filter(Boolean)
       if (urls.length === 0 && singleUrl) urls.push(singleUrl)
       if (urls.length === 0) {
@@ -93,7 +137,7 @@ export default function App() {
         payload = { urls }
       }
 
-      const res = await axios.post(`${BACKEND}/api/downloads`, payload, { responseType: 'blob', onDownloadProgress: (evt) => { if (evt.lengthComputable) setProgress(Math.round((evt.loaded / evt.total) * 100)) } })
+      const res = await axios.post(`${BACKEND}/api/downloads`, payload, { responseType: 'blob', onDownloadProgress: (evt) => { if (evt.lengthComputable) setProgress(Math.round((evt.loaded / evt.total) * 100)) }, headers: { 'X-Download-Id': downloadId } })
       const disposition = res.headers['content-disposition'] || ''
       let filename = 'downloads.zip'
       const m = /filename="?([^";]+)"?/.exec(disposition)
@@ -109,7 +153,8 @@ export default function App() {
       alert('Batch download failed: ' + (err?.response?.data?.detail || err.message))
     } finally {
       setDownloading(false)
-      setProgress(0)
+      setTimeout(() => setProgress(0), 1500)
+      try { if (es) es.close() } catch (e) { }
     }
   }
 
@@ -131,11 +176,11 @@ export default function App() {
         <button className="btn btn-primary me-2" onClick={fetchInfo} disabled={loading || (!singleUrl && !multiUrls)}>Get Info</button>
         <button className="btn btn-secondary" onClick={downloadAll} disabled={downloading || (!singleUrl && !multiUrls)}>Download All (ZIP)</button>
       </div>
-        <div className="mb-3">
-          <label className="form-label">Preferred format id for batch (optional)</label>
-          <input className="form-control" value={batchFormat} onChange={(e) => setBatchFormat(e.target.value)} placeholder="e.g. 22 or 140" />
-          <div className="form-text">If set, this format will be applied to every URL in a batch download.</div>
-        </div>
+      <div className="mb-3">
+        <label className="form-label">Preferred format id for batch (optional)</label>
+        <input className="form-control" value={batchFormat} onChange={(e) => setBatchFormat(e.target.value)} placeholder="e.g. 22 or 140" />
+        <div className="form-text">If set, this format will be applied to every URL in a batch download.</div>
+      </div>
 
       {loading && <div className="alert alert-info">Loading...</div>}
 
