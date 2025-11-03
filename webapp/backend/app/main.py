@@ -14,7 +14,39 @@ from fastapi import Depends
 from fastapi.security import APIKeyHeader
 import os
 
+import logging
+import re
+
 app = FastAPI(title="Youtube Downloader API")
+logger = logging.getLogger("ytdl")
+if not logger.handlers:
+    # ensure logs are written to a file for realtime inspection
+    log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except Exception:
+        log_dir = None
+    log_path = os.path.join(log_dir, 'backend.log') if log_dir else None
+    handlers = []
+    if log_path:
+        handlers.append(logging.FileHandler(log_path))
+    handlers.append(logging.StreamHandler())
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(name)s %(message)s',
+        handlers=handlers,
+    )
+    logger = logging.getLogger("ytdl")
+
+
+def _clean_exc_msg(e: Exception) -> str:
+    """Return a cleaned, single-line error message without ANSI color sequences."""
+    s = str(e)
+    # strip common ANSI escape sequences (colors) and newlines
+    s = re.sub(r"\x1B\[[0-?]*[ -/]*[@-~]", "", s)
+    s = s.replace("\n", " ")
+    return s.strip()
+
 
 # Configure CORS from environment (comma-separated) or default to allow all in dev
 allowed = os.getenv("ALLOWED_ORIGINS", "*")
@@ -78,7 +110,8 @@ async def api_info(req: InfoRequest, _=Depends(auth_and_rate_limit)):
         # Info endpoint is typically safe, but still allow API_KEY protection via header if set.
         info = get_info(req.url)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.exception("Error in api_info")
+        raise HTTPException(status_code=400, detail=_clean_exc_msg(e))
 
     # Return selected metadata + formats
     out = {
@@ -132,7 +165,8 @@ async def api_infos(req: InfoListRequest, _=Depends(auth_and_rate_limit)):
                 ],
             }
         except Exception as e:
-            out = {"url": url, "error": str(e)}
+            logger.exception("Error fetching info for %s", url)
+            out = {"url": url, "error": _clean_exc_msg(e)}
         results.append(out)
     return JSONResponse(results)
 
@@ -146,11 +180,18 @@ async def api_download(req: DownloadRequest, _=Depends(auth_and_rate_limit)):
     try:
         file_path = download_to_file(req.url, req.format_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Error in api_download for %s", req.url)
+        raise HTTPException(status_code=500, detail=_clean_exc_msg(e))
 
     if not os.path.exists(file_path):
         raise HTTPException(
             status_code=500, detail="Downloaded file not found")
+
+    # determine file size and include Content-Length when available to help client progress
+    try:
+        file_size = os.path.getsize(file_path)
+    except Exception:
+        file_size = None
 
     # Determine mime type
     mime_type, _ = mimetypes.guess_type(file_path)
@@ -176,6 +217,8 @@ async def api_download(req: DownloadRequest, _=Depends(auth_and_rate_limit)):
                 pass
 
     headers = {"Content-Disposition": f"attachment; filename=\"{filename}\""}
+    if file_size is not None:
+        headers["Content-Length"] = str(file_size)
     return StreamingResponse(iterfile(file_path), media_type=mime_type, headers=headers)
 
 
@@ -199,11 +242,13 @@ async def api_downloads(req: BatchDownloadRequest, _=Depends(auth_and_rate_limit
             try:
                 p = download_to_file(it.url, it.format_id)
             except Exception as e:
+                logger.exception("Batch download error for %s", it.url)
                 # record failures as simple text files so user knows
                 err_path = os.path.join(
                     workspace, f"error_{len(downloaded_paths)}.txt")
                 with open(err_path, "w", encoding="utf-8") as ef:
-                    ef.write(f"Failed to download {it.url}: {e}\n")
+                    ef.write(
+                        f"Failed to download {it.url}: {_clean_exc_msg(e)}\n")
                 downloaded_paths.append(err_path)
                 continue
 
@@ -243,11 +288,18 @@ async def api_downloads(req: BatchDownloadRequest, _=Depends(auth_and_rate_limit
                     pass
 
         headers = {"Content-Disposition": "attachment; filename=downloads.zip"}
+        try:
+            zsize = os.path.getsize(zip_path)
+        except Exception:
+            zsize = None
+        if zsize is not None:
+            headers["Content-Length"] = str(zsize)
         return StreamingResponse(iterzip(zip_path), media_type="application/zip", headers=headers)
     except Exception as e:
+        logger.exception("Unexpected error in api_downloads")
         # ensure workspace is removed on unexpected errors
         try:
             shutil.rmtree(workspace, ignore_errors=True)
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_clean_exc_msg(e))

@@ -1,7 +1,8 @@
 ﻿import React, { useState } from 'react'
 import axios from 'axios'
 
-const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8001'
+// Try environment override first. Default to localhost:8002 which avoids common port conflicts.
+const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8002'
 
 function humanFileSize(bytes) {
   if (!bytes) return '-'
@@ -23,6 +24,7 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [batchFormat, setBatchFormat] = useState('')
 
   const fetchInfo = async () => {
     setLoading(true)
@@ -83,7 +85,15 @@ export default function App() {
         alert('No URLs provided')
         return
       }
-      const res = await axios.post(`${BACKEND}/api/downloads`, { urls }, { responseType: 'blob', onDownloadProgress: (evt) => { if (evt.lengthComputable) setProgress(Math.round((evt.loaded / evt.total) * 100)) } })
+      // If the user provided a preferred batch format, build items with format_id
+      let payload
+      if (batchFormat && batchFormat.trim()) {
+        payload = { items: urls.map(u => ({ url: u, format_id: batchFormat.trim() })) }
+      } else {
+        payload = { urls }
+      }
+
+      const res = await axios.post(`${BACKEND}/api/downloads`, payload, { responseType: 'blob', onDownloadProgress: (evt) => { if (evt.lengthComputable) setProgress(Math.round((evt.loaded / evt.total) * 100)) } })
       const disposition = res.headers['content-disposition'] || ''
       let filename = 'downloads.zip'
       const m = /filename="?([^";]+)"?/.exec(disposition)
@@ -121,6 +131,11 @@ export default function App() {
         <button className="btn btn-primary me-2" onClick={fetchInfo} disabled={loading || (!singleUrl && !multiUrls)}>Get Info</button>
         <button className="btn btn-secondary" onClick={downloadAll} disabled={downloading || (!singleUrl && !multiUrls)}>Download All (ZIP)</button>
       </div>
+        <div className="mb-3">
+          <label className="form-label">Preferred format id for batch (optional)</label>
+          <input className="form-control" value={batchFormat} onChange={(e) => setBatchFormat(e.target.value)} placeholder="e.g. 22 or 140" />
+          <div className="form-text">If set, this format will be applied to every URL in a batch download.</div>
+        </div>
 
       {loading && <div className="alert alert-info">Loading...</div>}
 
@@ -131,7 +146,7 @@ export default function App() {
             <div key={idx} className="card mb-3">
               <div className="card-body">
                 <div className="d-flex gap-3 align-items-start mb-2">
-                  {it.thumbnails && it.thumbnails.length > 0 && (<img src={it.thumbnails[it.thumbnails.length-1].url} alt="thumb" style={{maxWidth:160}} />)}
+                  {it.thumbnails && it.thumbnails.length > 0 && (<img src={it.thumbnails[it.thumbnails.length - 1].url} alt="thumb" style={{ maxWidth: 160 }} />)}
                   <div>
                     <strong>{it.title || it.url}</strong>
                     <div className="text-muted small">{it.uploader || ''}  {it.duration ? `${it.duration}s` : ''}</div>
@@ -164,7 +179,7 @@ export default function App() {
       {info && !info.batch && (
         <div>
           <div className="d-flex gap-3 align-items-start mb-3">
-            {info.item.thumbnails && info.item.thumbnails.length > 0 && (<img src={info.item.thumbnails[info.item.thumbnails.length-1].url} alt="thumb" style={{maxWidth:220}} />)}
+            {info.item.thumbnails && info.item.thumbnails.length > 0 && (<img src={info.item.thumbnails[info.item.thumbnails.length - 1].url} alt="thumb" style={{ maxWidth: 220 }} />)}
             <div>
               <h4 className="mb-1">{info.item.title}</h4>
               <p className="mb-1">Uploader: {info.item.uploader}  Duration: {info.item.duration}s</p>
@@ -179,7 +194,7 @@ export default function App() {
                   <tr key={f.format_id}>
                     <td>{f.format_id}</td>
                     <td>{f.ext}</td>
-                    <td style={{maxWidth:200}}>{f.format_note}</td>
+                    <td style={{ maxWidth: 200 }}>{f.format_note}</td>
                     <td>{humanFileSize(f.filesize)}</td>
                     <td><button className="btn btn-sm btn-success" onClick={() => downloadSingle(info.url || singleUrl, f.format_id)} disabled={downloading}>{downloading ? 'Downloading...' : 'Download'}</button></td>
                   </tr>
@@ -193,7 +208,7 @@ export default function App() {
       {downloading && (
         <div className="mt-3">
           <div className="progress">
-            <div className="progress-bar" role="progressbar" style={{width: `${progress}%`}} aria-valuenow={progress} aria-valuemin="0" aria-valuemax="100">{progress}%</div>
+            <div className="progress-bar" role="progressbar" style={{ width: `${progress}%` }} aria-valuenow={progress} aria-valuemin="0" aria-valuemax="100">{progress}%</div>
           </div>
         </div>
       )}
