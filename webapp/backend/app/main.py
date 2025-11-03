@@ -99,6 +99,7 @@ class InfoRequest(BaseModel):
 class DownloadRequest(BaseModel):
     url: str
     format_id: str | None = None
+    output_dir: str | None = None  # Optional output directory path
 
 
 class InfoListRequest(BaseModel):
@@ -224,8 +225,18 @@ async def api_download(req: DownloadRequest, request: Request, _=Depends(auth_an
             logger.exception("progress hook failed")
 
     try:
+        # Validate output_dir if provided (basic security check)
+        if req.output_dir:
+            # Convert to absolute and normalize
+            abs_path = os.path.abspath(req.output_dir)
+            # Basic validation that path isn't trying to escape to system directories
+            if abs_path.startswith(('/windows', '/system32', '/boot', '/etc')):
+                raise HTTPException(
+                    status_code=400, detail="Invalid output directory")
+
         file_path = download_to_file(
-            req.url, req.format_id, progress_hook=_progress_hook)
+            req.url, req.format_id, progress_hook=_progress_hook,
+            output_dir=req.output_dir)
     except Exception as e:
         logger.exception("Error in api_download for %s", req.url)
         raise HTTPException(status_code=500, detail=_clean_exc_msg(e))

@@ -6,3 +6,4 @@ python-multipart
 python-magic
 redis
 rq
+requests
