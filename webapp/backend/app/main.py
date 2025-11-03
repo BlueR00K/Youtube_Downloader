@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 import asyncio
 import json
+from typing import Dict
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import mimetypes
