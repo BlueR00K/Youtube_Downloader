@@ -25,6 +25,7 @@ export default function App() {
   const [downloading, setDownloading] = useState(false)
   const [progress, setProgress] = useState(0)
   const [batchFormat, setBatchFormat] = useState('')
+  const [outputDir, setOutputDir] = useState('')
 
   const fetchInfo = async () => {
     setLoading(true)
@@ -72,7 +73,11 @@ export default function App() {
         // EventSource may not be available or SSE endpoint unreachable; fall back to xhr progress
         es = null
       }
-      const res = await axios.post(`${BACKEND}/api/download`, { url: targetUrl, format_id }, {
+      const res = await axios.post(`${BACKEND}/api/download`, {
+        url: targetUrl,
+        format_id,
+        output_dir: outputDir || null
+      }, {
         responseType: 'blob',
         onDownloadProgress: (evt) => {
           if (evt.lengthComputable) setProgress(Math.round((evt.loaded / evt.total) * 100))
@@ -129,12 +134,24 @@ export default function App() {
         alert('No URLs provided')
         return
       }
-      // If the user provided a preferred batch format, build items with format_id
+      // Build items with format and output_dir if provided
       let payload
       if (batchFormat && batchFormat.trim()) {
-        payload = { items: urls.map(u => ({ url: u, format_id: batchFormat.trim() })) }
+        payload = {
+          items: urls.map(u => ({
+            url: u,
+            format_id: batchFormat.trim(),
+            output_dir: outputDir || null
+          }))
+        }
       } else {
-        payload = { urls }
+        payload = {
+          urls,
+          items: urls.map(u => ({
+            url: u,
+            output_dir: outputDir || null
+          }))
+        }
       }
 
       const res = await axios.post(`${BACKEND}/api/downloads`, payload, { responseType: 'blob', onDownloadProgress: (evt) => { if (evt.lengthComputable) setProgress(Math.round((evt.loaded / evt.total) * 100)) }, headers: { 'X-Download-Id': downloadId } })
@@ -180,6 +197,12 @@ export default function App() {
         <label className="form-label">Preferred format id for batch (optional)</label>
         <input className="form-control" value={batchFormat} onChange={(e) => setBatchFormat(e.target.value)} placeholder="e.g. 22 or 140" />
         <div className="form-text">If set, this format will be applied to every URL in a batch download.</div>
+      </div>
+
+      <div className="mb-3">
+        <label className="form-label">Download directory (optional)</label>
+        <input className="form-control" value={outputDir} onChange={(e) => setOutputDir(e.target.value)} placeholder="/path/to/downloads" />
+        <div className="form-text">Leave empty to save in your browser's default download location.</div>
       </div>
 
       {loading && <div className="alert alert-info">Loading...</div>}
